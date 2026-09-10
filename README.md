@@ -3,6 +3,8 @@
 Four switchable workspace modes for [Omarchy](https://omarchy.org) (Hyprland), built for
 small screens where every pixel counts. One Lua module, one `require` line, no plugins.
 
+![Workspace Layout](./preview.png)
+
 **Default: `float`** — a traditional floating WM (XFCE/KDE/GNOME style): apps open at their
 natural size on the current workspace, snap to halves, maximize/restore cleanly, and the
 focused window is always on top.
