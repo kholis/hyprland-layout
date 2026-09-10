@@ -1,0 +1,67 @@
+#!/bin/bash
+# hyprland-layout-set — set the workspace layout from the shell or the Omarchy
+# menu (Trigger > Toggle > Workspace Layout).
+#
+# Usage:
+#   hyprland-layout-set <tiling|scrolling|float|own|stacked>
+#   hyprland-layout-set current     print the effective layout name
+#
+# tiling / scrolling are per-workspace Hyprland layouts, matching Omarchy's
+# stock dwindle/scrolling toggle (persisted in
+# ~/.local/state/omarchy/workspace-layouts/<ws>.lua). float / own / stacked are
+# the global modes from hyprland-layout's workspaces.lua (persisted in
+# ~/.local/state/omarchy/screen-estate/mode). Selecting tiling/scrolling first
+# leaves any global mode so windows actually tile again.
+
+MODE_FILE="$HOME/.local/state/omarchy/screen-estate/mode"
+LAYOUTS_DIR="$HOME/.local/state/omarchy/workspace-layouts"
+
+global_mode() { cat "$MODE_FILE" 2>/dev/null || true; }
+
+set_global_mode() { # $1 = float|own|stacked|tiling
+  hyprctl eval "hyprland_layout_set_mode('$1')" >/dev/null 2>&1 && return 0
+  # Fallback for configs without the runtime setter: persist + reload.
+  mkdir -p "$(dirname "$MODE_FILE")"
+  printf '%s' "$1" > "$MODE_FILE"
+  hyprctl reload >/dev/null
+  omarchy-notification-send -g 󱂬 "Workspace layout set to $1"
+}
+
+print_current() {
+  local mode
+  mode=$(global_mode)
+  case "$mode" in
+    float | own | stacked) echo "$mode"; return ;;
+  esac
+  local layout
+  layout=$(hyprctl activeworkspace -j | jq -r '.tiledLayout // "dwindle"')
+  [[ "$layout" == "scrolling" ]] && echo "scrolling" || echo "tiling"
+}
+
+case "${1:-}" in
+  current)
+    print_current
+    ;;
+  float | own | stacked)
+    set_global_mode "$1" # the Lua setter sends the notification
+    ;;
+  tiling | scrolling)
+    # Leave float/own/stacked so the workspace tiles again.
+    case "$(global_mode)" in
+      float | own | stacked) set_global_mode tiling ;;
+    esac
+
+    ACTIVE_WORKSPACE=$(hyprctl activeworkspace -j | jq -r '.id')
+    [[ $ACTIVE_WORKSPACE =~ ^-?[0-9]+$ ]] || exit 1
+    mkdir -p "$LAYOUTS_DIR"
+    printf 'hl.workspace_rule({ workspace = "%s", layout = "%s" })\n' \
+      "$ACTIVE_WORKSPACE" "$1" > "$LAYOUTS_DIR/$ACTIVE_WORKSPACE.lua"
+    hyprctl eval "hl.workspace_rule({ workspace = \"$ACTIVE_WORKSPACE\", layout = \"$1\" })" >/dev/null 2>&1 ||
+      hyprctl keyword workspace "$ACTIVE_WORKSPACE, layout:$1"
+    omarchy-notification-send -g 󱂬 "Workspace layout set to $1"
+    ;;
+  *)
+    echo "usage: hyprland-layout-set <tiling|scrolling|float|own|stacked|current>" >&2
+    exit 1
+    ;;
+esac

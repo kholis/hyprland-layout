@@ -1,0 +1,31 @@
+  // hyprland-layout: turns the stock dwindle/scrolling toggle into a layout
+  // picker with the modes from ~/.config/hypr/workspaces.lua. Checked state
+  // and actions are provided by the hyprland-layout-set CLI.
+  "trigger.toggle.workspace-layout": {
+    "icon": "󱂬", "label": "Workspace Layout", "title": "Workspace Layout", "action": ""
+  },
+  "trigger.toggle.workspace-layout.tiling": {
+    "icon": "󰀹", "label": "Tiling (Dwindle)", "description": "Stock dwindle tiling — default",
+    "checked": "[[ \"$(hyprland-layout-set current)\" == \"tiling\" ]]",
+    "action": "hyprland-layout-set tiling"
+  },
+  "trigger.toggle.workspace-layout.scrolling": {
+    "icon": "󰖯", "label": "Scrolling", "description": "Tiled columns in a scrolling strip",
+    "checked": "[[ \"$(hyprland-layout-set current)\" == \"scrolling\" ]]",
+    "action": "hyprland-layout-set scrolling"
+  },
+  "trigger.toggle.workspace-layout.float": {
+    "icon": "󰑌", "label": "Floating", "description": "Apps float at natural size on the current workspace",
+    "checked": "[[ \"$(hyprland-layout-set current)\" == \"float\" ]]",
+    "action": "hyprland-layout-set float"
+  },
+  "trigger.toggle.workspace-layout.own": {
+    "icon": "󰍹", "label": "Own Workspace", "description": "Each new app gets its own workspace",
+    "checked": "[[ \"$(hyprland-layout-set current)\" == \"own\" ]]",
+    "action": "hyprland-layout-set own"
+  },
+  "trigger.toggle.workspace-layout.stacked": {
+    "icon": "󰡉", "label": "Stacked", "description": "Maximized on workspace 1, one window at a time",
+    "checked": "[[ \"$(hyprland-layout-set current)\" == \"stacked\" ]]",
+    "action": "hyprland-layout-set stacked"
+  }

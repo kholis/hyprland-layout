@@ -29,6 +29,9 @@
 -- "Hyper" is MOD3 (e.g. Caps Lock mapped to Hyper). If you don't have one,
 -- swap "MOD3" for another modifier in the binds below.
 -- Requires Omarchy's Lua config helpers (o.bind / o.notify) — Hyprland 0.55+.
+--
+-- Modes can also be set at runtime from the shell / Omarchy menu via
+-- bin/hyprland-layout-set (see README): `hyprland-layout-set float` etc.
 
 local default_mode = "float" -- "own" | "float" | "stacked" | "tiling"
 
@@ -394,8 +397,15 @@ local mode_messages = {
 
 local next_mode = { own = "float", float = "stacked", stacked = "tiling", tiling = "own" }
 
-o.bind("MOD3 + SPACE", "Cycle mode: own / float / stacked / tiling", function()
-  mode = next_mode[mode] or "float"
+-- Runtime mode switch shared by the Hyper+Space cycle below and the Omarchy
+-- menu integration (bin/hyprland-layout-set reaches it through
+-- `hyprctl eval "hyprland_layout_set_mode('float')"`). Global on purpose:
+-- module-locals are not reachable from `hyprctl eval`.
+function hyprland_layout_set_mode(new_mode)
+  if new_mode == nil or next_mode[new_mode] == nil then
+    return false
+  end
+  mode = new_mode
   write_mode(mode)
   apply_mode()
   if mode == "stacked" then
@@ -404,4 +414,9 @@ o.bind("MOD3 + SPACE", "Cycle mode: own / float / stacked / tiling", function()
     float_existing_windows_in_place()
   end
   hl.exec_cmd(o.notify(mode_messages[mode] or mode))
+  return true
+end
+
+o.bind("MOD3 + SPACE", "Cycle mode: own / float / stacked / tiling", function()
+  hyprland_layout_set_mode(next_mode[mode] or "float")
 end)

@@ -7,6 +7,10 @@ small screens where every pixel counts. One Lua module, one `require` line, no p
 natural size on the current workspace, snap to halves, maximize/restore cleanly, and the
 focused window is always on top.
 
+Integrates with the **Omarchy menu** (`Trigger > Toggle > Workspace Layout`): the stock
+dwindle/scrolling toggle becomes a five-way picker — Tiling (Dwindle), Scrolling, Floating,
+Own Workspace, Stacked — with a ✓ on the active layout.
+
 ## Modes (cycle with `Hyper+Space`)
 
 | Mode | Behavior |
@@ -17,6 +21,20 @@ focused window is always on top.
 | `tiling` | Stock Hyprland dwindle tiling — nothing touched. |
 
 The choice persists across reloads and reboots.
+
+## Omarchy menu & CLI
+
+Besides `Hyper+Space`, layouts can be picked from the Omarchy menu
+(`Trigger > Toggle > Workspace Layout`) or set from the shell:
+
+```sh
+hyprland-layout-set float      # or: own | stacked | tiling | scrolling
+hyprland-layout-set current    # print the active layout
+```
+
+`tiling`/`scrolling` match Omarchy's stock per-workspace layouts (dwindle vs scrolling
+strip) and first leave any global mode so windows tile again. `float`/`own`/`stacked`
+are the global modes from the table above.
 
 ## Keys
 
@@ -39,8 +57,11 @@ cd hyprland-layout && ./install.sh
 ```
 
 The installer deploys `hypr/workspaces.lua` to `~/.config/hypr/`, adds one
-`require("hypr.workspaces")` line to `hyprland.lua` (backing up anything it replaces), and
-validates with `hyprctl configerrors`. Re-running is safe.
+`require("hypr.workspaces")` line to `hyprland.lua` (backing up anything it replaces),
+installs the `hyprland-layout-set` CLI to `~/.local/bin/`, and merges the menu entries
+into `~/.config/omarchy/extensions/omarchy-menu.jsonc` (between `>>> hyprland-layout >>>`
+sentinels, never duplicating on re-run). It validates with `hyprctl configerrors`.
+Re-running is safe.
 
 ## Uninstall
 
