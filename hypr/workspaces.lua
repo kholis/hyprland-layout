@@ -8,6 +8,8 @@
 --              natural size — no forced maximize or tiling. Drag, resize,
 --              overlap at will. Snaps to screen halves with Hyper+arrows,
 --              maximizes with Super+Alt+F, cycles/raises with Alt+Tab.
+--              Focus is click-to-focus (see float_click_to_focus below):
+--              hovering never steals focus from the current window.
 --              persistent_size: resize an app once and future windows of the
 --              same class+title reopen at that size.
 --
@@ -39,6 +41,11 @@ local default_mode = "float" -- "own" | "float" | "stacked" | "tiling"
 -- mode, e.g. windows you place yourself with workspace rules: { "qemu" }
 local keep_classes = {}
 
+-- In float mode, focus a window only by CLICKING it — hovering the mouse
+-- never steals focus (Hyprland follow_mouse = 0). Other modes keep Omarchy's
+-- stock follow-mouse. Set to false for follow-mouse while floating too.
+local float_click_to_focus = true
+
 -- ---------------------------------------------------------------- state ----
 local state_dir = (os.getenv("HOME") or "") .. "/.local/state/omarchy/screen-estate"
 local state_file = state_dir .. "/mode"
@@ -64,6 +71,7 @@ local function write_mode(value)
 end
 
 local mode = read_mode() or default_mode
+local follow_mouse_touched = false
 
 -- ---------------------------------------------------------------- rules ----
 -- stacked: send every new window to workspace 1, monocle-stacked.
@@ -88,6 +96,19 @@ local function apply_mode()
   -- Monocle: every window fills the whole workspace, one visible at a time.
   -- Dwindle: Omarchy's default tiling (used by own/float/tiling).
   hl.config({ general = { layout = mode == "stacked" and "monocle" or "dwindle" } })
+
+  -- Float mode focuses on click, not on hover. Only touched while floating so
+  -- a user's own follow_mouse choice (input.lua) survives otherwise; leaving
+  -- float restores Omarchy's stock follow_mouse = 1.
+  if mode == "float" and float_click_to_focus then
+    if not follow_mouse_touched then
+      hl.config({ input = { follow_mouse = 0 } })
+      follow_mouse_touched = true
+    end
+  elseif follow_mouse_touched then
+    hl.config({ input = { follow_mouse = 1 } })
+    follow_mouse_touched = false
+  end
 end
 
 apply_mode()

@@ -17,7 +17,7 @@ Own Workspace, Stacked — with a ✓ on the active layout.
 
 | Mode | Behavior |
 |---|---|
-| `float` *(default)* | Apps float on the **current workspace** at natural size. Resize once → size is remembered per app (`persistent_size`). |
+| `float` *(default)* | Apps float on the **current workspace** at natural size. Resize once → size is remembered per app (`persistent_size`). Click-to-focus: hovering never steals focus (`float_click_to_focus`). |
 | `own` | Every new app gets **its own workspace** — nothing shares until you move it there. Closing a workspace's last window returns you to the previous one. |
 | `stacked` | Everything opens **maximized on workspace 1** (Monocle layout), one window visible at a time. |
 | `tiling` | Stock Hyprland dwindle tiling — nothing touched. |
@@ -82,6 +82,7 @@ Edit `~/.config/hypr/workspaces.lua`:
 
 - `default_mode` — starting mode (`"float"`, `"own"`, `"stacked"`, `"tiling"`)
 - `keep_classes` — apps never auto-relocated in `own` mode
+- `float_click_to_focus` — in float mode, focus windows by click instead of hover (`false` to keep follow-mouse)
 
 ## License
 
