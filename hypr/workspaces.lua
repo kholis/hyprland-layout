@@ -270,8 +270,34 @@ hl.on("window.destroy", function(w)
   end
 end)
 
+-- Any fullscreen state (real fullscreen or maximized) — such windows own
+-- the top render layer of their workspace and must not be z-swapped
+-- lightly: alter_zorder on them desyncs input from rendering.
+local function window_is_fullscreen(w)
+  return w ~= nil and (w.fullscreen or 0) ~= 0
+end
+
 -- ------------------------------------------------------ window cycling ----
 -- Plain cycle_next does not work under Monocle; cycle with layout messages.
+-- It also only alternates between windows of the same kind as the focused
+-- one (floating vs tiled), so a tiled straggler — an app opened before float
+-- mode was enabled, like a browser from a tiling session — can never be
+-- reached: the cycle sticks on the focused float and the straggler stays
+-- covered. In float mode every window is floating by definition, so float
+-- the stragglers before cycling (and on focus, below) to keep Alt+Tab able
+-- to reach and surface every window on the workspace.
+local function float_all_on_workspace()
+  local active = hl.get_active_workspace()
+  if active == nil then
+    return
+  end
+  for _, win in ipairs(hl.get_workspace_windows(active.id) or {}) do
+    if not win.floating then
+      hl.dispatch(hl.dsp.window.float({ action = "set", window = win }))
+    end
+  end
+end
+
 -- Replaces Omarchy's Alt+Tab binds with mode-aware versions.
 hl.unbind("ALT + TAB")
 hl.unbind("ALT + SHIFT + TAB")
@@ -280,16 +306,28 @@ o.bind("ALT + TAB", "Focus on next window", function()
   if mode == "stacked" then
     hl.dispatch(hl.dsp.layout("cyclenext"))
   else
+    if mode == "float" then
+      float_all_on_workspace()
+    end
     hl.dispatch(hl.dsp.window.cycle_next())
-    hl.dispatch(hl.dsp.window.bring_to_top())
+    local win = hl.get_active_window()
+    if win ~= nil and win.floating and not window_is_fullscreen(win) then
+      hl.dispatch(hl.dsp.window.bring_to_top())
+    end
   end
 end)
 o.bind("ALT + SHIFT + TAB", "Focus on previous window", function()
   if mode == "stacked" then
     hl.dispatch(hl.dsp.layout("cycleprev"))
   else
+    if mode == "float" then
+      float_all_on_workspace()
+    end
     hl.dispatch(hl.dsp.window.cycle_next({ next = false }))
-    hl.dispatch(hl.dsp.window.bring_to_top())
+    local win = hl.get_active_window()
+    if win ~= nil and win.floating and not window_is_fullscreen(win) then
+      hl.dispatch(hl.dsp.window.bring_to_top())
+    end
   end
 end)
 
@@ -300,8 +338,14 @@ local function cycle_window(forward)
     if mode == "stacked" then
       hl.dispatch(hl.dsp.layout(forward and "cyclenext" or "cycleprev"))
     else
+      if mode == "float" then
+        float_all_on_workspace()
+      end
       hl.dispatch(hl.dsp.window.cycle_next({ next = forward }))
-      hl.dispatch(hl.dsp.window.bring_to_top())
+      local win = hl.get_active_window()
+      if win ~= nil and win.floating and not window_is_fullscreen(win) then
+        hl.dispatch(hl.dsp.window.bring_to_top())
+      end
     end
   end
 end
@@ -310,14 +354,40 @@ o.bind("MOD3 + TAB", "Next window", cycle_window(true))
 o.bind("MOD3 + SHIFT + TAB", "Previous window", cycle_window(false))
 
 -- -------------------------------------------- raise focused window --------
--- Floating windows: focusing a window (Hyper+A/B/..., Alt+Tab, launcher,
--- click) also RAISES it to the front. NOTE: only alter_zorder on FLOATING
--- windows — doing it to tiled/maximized windows desyncs input from rendering
--- (window visually behind but eating clicks). Maximized windows are kept
--- floating in float mode via the Super+Alt+F rebind below, so they raise
--- correctly through this same path.
 hl.on("window.active", function(w)
-  if w ~= nil and w.floating then
+  if w == nil then
+    return
+  end
+
+  if mode ~= "float" then
+    -- Other modes: raise only ordinary floating windows — z-swapping
+    -- fullscreen/tiled windows desyncs input from rendering.
+    if w.floating and not window_is_fullscreen(w) then
+      hl.dispatch(hl.dsp.window.alter_zorder({ mode = "top", window = w }))
+    end
+    return
+  end
+
+  -- float mode: the focused window must end up visible, whatever it is.
+  -- Tiled stragglers (opened in other modes) adopt the mode when focused.
+  if not w.floating then
+    hl.dispatch(hl.dsp.window.float({ action = "set", window = w }))
+  end
+
+  if window_is_fullscreen(w) then
+    -- Fullscreen windows own the top render layer, but a float raised
+    -- earlier (by a previous focus) can stay stuck above it — the input/
+    -- rendering desync. Sink the other floats so the fullscreen window
+    -- shows through and stays clickable.
+    local ws = w.workspace
+    if ws ~= nil then
+      for _, win in ipairs(hl.get_workspace_windows(ws.id) or {}) do
+        if win.address ~= w.address and win.floating and not window_is_fullscreen(win) then
+          hl.dispatch(hl.dsp.window.alter_zorder({ mode = "bottom", window = win }))
+        end
+      end
+    end
+  else
     hl.dispatch(hl.dsp.window.alter_zorder({ mode = "top", window = w }))
   end
 end)
