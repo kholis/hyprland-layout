@@ -203,7 +203,10 @@ local function track_active_workspace()
 end
 
 hl.on("workspace.active", function(ws)
-  if ws == nil or ws.special then
+  -- Workspace objects, like windows, can arrive expired (nil reads) when the
+  -- event fires for a workspace being torn down; `ws.id == nil` catches that
+  -- before it corrupts the history below.
+  if ws == nil or ws.id == nil or ws.special then
     return
   end
   if current_ws ~= nil and ws.id ~= current_ws then
@@ -275,6 +278,17 @@ end)
 -- lightly: alter_zorder on them desyncs input from rendering.
 local function window_is_fullscreen(w)
   return w ~= nil and (w.fullscreen or 0) ~= 0
+end
+
+-- Hyprland 0.56 fires `window.active` with a NULL window when focus is
+-- cleared (last window on a workspace closed, focus moved to a layer-shell
+-- surface) and hands Lua an EXPIRED HL.Window userdata instead of nil:
+-- every property read silently returns nil, and dispatching it raises
+-- "runtime error in lua: window selector: window object is expired".
+-- Properties of a live window are never nil, so a nil read marks a dead
+-- object — treat it as "no window".
+local function window_is_alive(w)
+  return w ~= nil and w.mapped ~= nil
 end
 
 -- ------------------------------------------------------ window cycling ----
@@ -355,7 +369,7 @@ o.bind("MOD3 + SHIFT + TAB", "Previous window", cycle_window(false))
 
 -- -------------------------------------------- raise focused window --------
 hl.on("window.active", function(w)
-  if w == nil then
+  if not window_is_alive(w) then
     return
   end
 
