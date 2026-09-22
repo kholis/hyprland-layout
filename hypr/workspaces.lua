@@ -13,6 +13,13 @@
 --              persistent_size: resize an app once and future windows of the
 --              same class+title reopen at that size.
 --
+--              Every window's size/position and maximized/fullscreen state is
+--              also REMEMBERED (see remember_windows below): after the screen
+--              locks (suspend/screensaver) and you log back in, windows keep
+--              their maximized state instead of coming back as plain floats —
+--              and the first window of an app reopens at its remembered
+--              size/position/state, like the WMs of old.
+--
 --   "own"      Every new app opens ALONE on its own empty workspace. A second
 --              window never appears unless you move one there yourself
 --              (SUPER+SHIFT+1..9). Switch apps with SUPER+1..9 (workspace
@@ -28,6 +35,14 @@
 --   "tiling"   Stock Hyprland/Omarchy dwindle tiling. Nothing is relocated
 --              or floated; the fallback for purists.
 --
+-- Window state memory: every window's size, position and maximized/fullscreen
+-- state is remembered. This matters most around the lock screen: Omarchy locks
+-- before suspend, and when the machine wakes the monitor re-arrangement makes
+-- Hyprland forget that floating windows were maximized (Super+Alt+F) — after
+-- login they'd come back as plain floating windows. The layout re-applies each
+-- window's remembered state a moment after monitors (re)appear. In float/own
+-- mode the first window of an app also reopens at its remembered
+-- size/position/state, like the WMs of old. The memory survives crashes.
 -- "Hyper" is MOD3 (e.g. Caps Lock mapped to Hyper). If you don't have one,
 -- swap "MOD3" for another modifier in the binds below.
 -- Requires Omarchy's Lua config helpers (o.bind / o.notify) — Hyprland 0.55+.
@@ -45,6 +60,15 @@ local keep_classes = {}
 -- never steals focus (Hyprland follow_mouse = 0). Other modes keep Omarchy's
 -- stock follow-mouse. Set to false for follow-mouse while floating too.
 local float_click_to_focus = true
+
+-- Remember every window's size, position and maximized/fullscreen state, and
+-- restore it after monitor re-arrangements (suspend/resume, docking, screen
+-- changes) and when an app reopens its first window. Set to false to disable.
+local remember_windows = true
+
+-- Window titles that are never remembered: overlay windows like Firefox's
+-- Picture-in-Picture would otherwise overwrite the app's remembered geometry.
+local remember_skip_titles = { "Picture-in-Picture" }
 
 -- ---------------------------------------------------------------- state ----
 local state_dir = (os.getenv("HOME") or "") .. "/.local/state/omarchy/screen-estate"
@@ -291,6 +315,361 @@ local function window_is_alive(w)
   return w ~= nil and w.mapped ~= nil
 end
 
+-- ------------------------------------------------ window state memory -----
+-- Every window's size/position (while plain-floating) and maximized/fullscreen
+-- state is tracked live. Records live in memory keyed by window address
+-- (exact, per-instance) and are mirrored per app class, persisted to
+-- windows.db so the memory even survives a compositor crash.
+local memory_db = state_dir .. "/windows.db"
+local mem_by_address = {}
+local mem_by_class = {}
+local memory_dirty = false
+local memory_last_flush = 0
+local memory_frozen_until = 0
+
+local function window_memory_skipped(win)
+  local title = win.title or ""
+  for _, needle in ipairs(remember_skip_titles) do
+    if needle ~= "" and title:find(needle, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Take a sample of a window's current state. Geometry is only recorded while
+-- the window is a plain float: a maximized/fullscreen window's at/size is the
+-- work area, not the app's own size — the last normal geometry is kept then.
+-- `force` records even while memory is frozen (see restore_after_monitor_event).
+local function sample_window(win, force)
+  if not remember_windows or not window_is_alive(win) or win.pinned or window_memory_skipped(win) then
+    return
+  end
+  if not force and os.time() < memory_frozen_until then
+    -- A monitor re-arrangement is in progress: Hyprland is about to (or just
+    -- did) drop maximized/fullscreen state, and the dropped state must NOT
+    -- overwrite what we remember — the restore passes need it.
+    return
+  end
+
+  local class = win.initial_class or win.class
+  if class == nil or class == "" then
+    return
+  end
+
+  local fs = win.fullscreen or 0 -- 0 normal, 1 maximized, 2 fullscreen
+  local floating = win.floating == true
+  local mon = win.monitor
+  local mon_name = (mon ~= nil and mon.name) or ""
+
+  local prev = mem_by_address[win.address]
+  local rec = {
+    fs = fs,
+    fl = floating,
+    mon = mon_name,
+    x = prev ~= nil and prev.x or nil,
+    y = prev ~= nil and prev.y or nil,
+    w = prev ~= nil and prev.w or nil,
+    h = prev ~= nil and prev.h or nil,
+    -- fs before the last recorded change + when it changed: lets the freeze
+    -- handler undo a maximized/fullscreen loss that was recorded a moment
+    -- BEFORE the monitor event fired (drop and events race each other).
+    pfs = nil,
+    changed = nil,
+  }
+  if prev ~= nil and prev.fs ~= fs then
+    rec.pfs, rec.changed = prev.fs, os.time()
+  elseif prev ~= nil then
+    rec.pfs, rec.changed = prev.pfs, prev.changed
+  end
+
+  if fs == 0 and floating then
+    local at, size = win.at, win.size
+    if at ~= nil and size ~= nil and (size.x or 0) > 0 and (size.y or 0) > 0 then
+      rec.x, rec.y, rec.w, rec.h = at.x, at.y, size.x, size.y
+    end
+  end
+
+  mem_by_address[win.address] = rec
+  mem_by_class[class] = rec
+  memory_dirty = true
+end
+
+local function sample_all_windows()
+  if not remember_windows then
+    return
+  end
+  local windows = hl.get_windows() or {}
+  for _, win in ipairs(windows) do
+    sample_window(win)
+  end
+  -- Drop records of windows that are gone (their final state was already
+  -- merged into the per-class memory by sample_window/close handling).
+  local alive = {}
+  for _, win in ipairs(windows) do
+    alive[win.address] = true
+  end
+  for addr in pairs(mem_by_address) do
+    if not alive[addr] then
+      mem_by_address[addr] = nil
+    end
+  end
+end
+
+local function flush_memory(force)
+  if not remember_windows or not memory_dirty then
+    return
+  end
+  if not force and os.time() - memory_last_flush < 3 then
+    return
+  end
+  local file = io.open(memory_db, "w")
+  if file == nil then
+    return
+  end
+  for class, r in pairs(mem_by_class) do
+    file:write(string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n",
+      (class:gsub("[\t\r\n]", " ")),
+      r.fs or 0,
+      r.fl and 1 or 0,
+      r.x or 0, r.y or 0, r.w or 0, r.h or 0,
+      ((r.mon or ""):gsub("[\t\r\n]", ""))))
+  end
+  file:close()
+  memory_dirty = false
+  memory_last_flush = os.time()
+end
+
+local function load_memory()
+  local file = io.open(memory_db, "r")
+  if file == nil then
+    return
+  end
+  for line in file:lines() do
+    local class, fs, fl, x, y, w, h, mon =
+      line:match("^([^\t]+)\t(%d+)\t(%d+)\t(%-?%d+)\t(%-?%d+)\t(%-?%d+)\t(%-?%d+)\t(.*)$")
+    if class ~= nil and class ~= "" then
+      mem_by_class[class] = {
+        fs = tonumber(fs) or 0,
+        fl = fl == "1",
+        x = tonumber(x) or 0,
+        y = tonumber(y) or 0,
+        w = tonumber(w) or 0,
+        h = tonumber(h) or 0,
+        mon = mon or "",
+      }
+    end
+  end
+  file:close()
+end
+
+local function ensure_float(win)
+  if not win.floating then
+    hl.dispatch(hl.dsp.window.float({ action = "set", window = win }))
+  end
+end
+
+-- Put a window back at a remembered geometry. Only when the monitor it was on
+-- still exists — otherwise Hyprland's own re-placement is the better guess.
+local function apply_remembered_geometry(win, r)
+  if r.w == nil or r.w <= 0 or r.h == nil or r.h <= 0 then
+    return
+  end
+  local mon = (r.mon ~= nil and r.mon ~= "") and hl.get_monitor(r.mon) or nil
+  if mon == nil then
+    return
+  end
+  -- Resize first, then move, so the window lands on its exact old spot.
+  hl.dispatch(hl.dsp.window.resize({ x = r.w, y = r.h, window = win }))
+  hl.dispatch(hl.dsp.window.move({ x = r.x or 0, y = r.y or 0, window = win }))
+end
+
+local function apply_remembered_state(win, r)
+  if r.fs ~= 0 then
+    if mode == "float" then
+      ensure_float(win)
+    end
+    hl.dispatch(hl.dsp.window.fullscreen({
+      mode = r.fs == 2 and "fullscreen" or "maximized",
+      action = "set",
+      window = win,
+    }))
+  elseif r.w ~= nil and r.w > 0 then
+    apply_remembered_geometry(win, r)
+  end
+end
+
+-- Re-apply remembered state where a window no longer matches it. Runs a few
+-- times after monitor events, because the re-arrangement settles
+-- asynchronously over a couple of seconds (and passes that find nothing to do
+-- are cheap no-ops).
+local function restore_pass()
+  if not remember_windows then
+    return
+  end
+  for _, win in ipairs(hl.get_windows() or {}) do
+    if window_is_alive(win) and not win.pinned then
+      local r = mem_by_address[win.address]
+      if r ~= nil then
+        local fs_now = win.fullscreen or 0
+        -- The lock-screen bug: maximized/fullscreen before the monitor event,
+        -- plain floating afterwards — put the state back.
+        if r.fs ~= 0 and fs_now ~= r.fs then
+          apply_remembered_state(win, r)
+        elseif r.fs == 0 and fs_now == 0 and win.floating then
+          -- Plain float driven off its monitor (or collapsed to nothing)
+          -- by the re-arrangement: put it back where it was.
+          local at, size, mon = win.at, win.size, win.monitor
+          if at ~= nil and size ~= nil and mon ~= nil and r.w ~= nil and r.w > 0 then
+            local outside = at.x + size.x <= mon.x or at.x >= mon.x + mon.width
+                or at.y + size.y <= mon.y or at.y >= mon.y + mon.height
+            local collapsed = (size.x or 0) <= 1 or (size.y or 0) <= 1
+            if outside or collapsed then
+              apply_remembered_geometry(win, r)
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+-- Debug/manual use: `hyprctl eval "hyprland_layout_restore_windows"`.
+function hyprland_layout_restore_windows()
+  restore_pass()
+  return true
+end
+
+-- Monitors (dis)appear on suspend/resume, docking and screen changes — and
+-- that re-arrangement is what forgets maximized/fullscreen state. Freeze live
+-- sampling while the passes run, so the dropped state never overwrites what
+-- we remember, then re-apply a few times (the re-arrangement settles
+-- asynchronously over a couple of seconds).
+local function restore_after_monitor_event()
+  if not remember_windows then
+    return
+  end
+  -- If a maximized/fullscreen state was lost a moment BEFORE this event
+  -- arrived (the drop races the events), the sampler already recorded the
+  -- loss: undo it, then freeze so late drops can't be recorded either.
+  local now = os.time()
+  for _, r in pairs(mem_by_address) do
+    if r.pfs ~= nil and r.pfs ~= 0 and r.fs == 0 and (now - (r.changed or 0)) <= 3 then
+      r.fs, r.pfs, r.changed = r.pfs, nil, nil
+      memory_dirty = true
+    end
+  end
+  memory_frozen_until = os.time() + 8
+  for _, delay in ipairs({ 300, 900, 2200, 4000 }) do
+    hl.timer(restore_pass, { timeout = delay, type = "oneshot" })
+  end
+end
+
+hl.on("monitor.added", restore_after_monitor_event)
+hl.on("monitor.removed", restore_after_monitor_event)
+hl.on("monitor.layout_changed", restore_after_monitor_event)
+hl.on("workspace.move_to_monitor", restore_after_monitor_event)
+
+-- Reopen at the remembered size/position/state: only for the FIRST window of
+-- an app (dialogs and overlays of an already-running app keep their own ideas
+-- about where they belong). Geometry only applies to floating windows; the
+-- maximized/fullscreen state applies in float and own modes.
+local function schedule_open_restore(win)
+  if not remember_windows or (mode ~= "float" and mode ~= "own") then
+    return
+  end
+  local class = win.initial_class or win.class
+  if class == nil or class == "" then
+    return
+  end
+  for _, other in ipairs(hl.get_windows() or {}) do
+    if other.address ~= win.address and (other.initial_class or other.class) == class then
+      return
+    end
+  end
+
+  local addr = win.address
+  local remembered = mem_by_class[class]
+  if remembered == nil then
+    return
+  end
+
+  local applied = false
+  local function pass()
+    if applied then
+      return
+    end
+    local target = nil
+    for _, w in ipairs(hl.get_windows() or {}) do
+      if w.address == addr then
+        target = w
+        break
+      end
+    end
+    if not window_is_alive(target) or (target.fullscreen or 0) ~= 0 then
+      return -- gone again, or the app made it fullscreen itself: leave it be
+    end
+    if mode == "float" then
+      ensure_float(target)
+    end
+    apply_remembered_state(target, remembered)
+    sample_window(target)
+    applied = true
+  end
+
+  -- Apps often adjust themselves right after mapping; two short passes catch
+  -- windows that weren't ready on the first try without re-fighting later
+  -- app-initiated changes.
+  hl.timer(pass, { timeout = 150, type = "oneshot" })
+  hl.timer(pass, { timeout = 700, type = "oneshot" })
+end
+
+hl.on("window.open", function(w)
+  if w ~= nil then
+    sample_window(w)
+    schedule_open_restore(w)
+  end
+end)
+
+hl.on("window.fullscreen", function(w)
+  if w ~= nil then
+    sample_window(w)
+  end
+end)
+
+hl.on("window.active", function(w)
+  if window_is_alive(w) then
+    sample_window(w)
+  end
+end)
+
+hl.on("window.close", function(w)
+  if w ~= nil then
+    sample_window(w, true) -- deliberate close: capture the final state even mid-freeze
+    flush_memory(true)
+  end
+end)
+
+hl.on("window.destroy", function()
+  flush_memory(true)
+end)
+
+hl.on("hyprland.shutdown", function()
+  sample_all_windows()
+  flush_memory(true)
+end)
+
+if remember_windows then
+  os.execute("mkdir -p " .. state_dir)
+  load_memory()
+  -- No move/resize Lua events exist, so poll: cheap live tracking of drags
+  -- and resizes, plus debounced persistence.
+  hl.timer(function()
+    sample_all_windows()
+    flush_memory(false)
+  end, { timeout = 2000, type = "repeat" })
+end
+
 -- ------------------------------------------------------ window cycling ----
 -- Plain cycle_next does not work under Monocle; cycle with layout messages.
 -- It also only alternates between windows of the same kind as the focused
@@ -413,7 +792,15 @@ end)
 hl.unbind("SUPER + ALT + F")
 o.bind("SUPER + ALT + F", "Maximize / restore", function()
   local win = hl.get_active_window()
-  if mode == "float" and win ~= nil and not win.floating then
+  if win == nil then
+    return
+  end
+  -- Remember the normal size/position right before toggling: while maximized
+  -- the window shows work-area geometry, and this is what a later restore
+  -- (lock-screen wake, app reopen) brings back. User-initiated: sample even
+  -- if a monitor-event freeze is active.
+  sample_window(win, true)
+  if mode == "float" and not win.floating then
     hl.dispatch(hl.dsp.window.float({ action = "set", window = win }))
   end
   hl.dispatch(hl.dsp.window.fullscreen({ mode = "maximized" }))

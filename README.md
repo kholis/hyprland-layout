@@ -24,6 +24,27 @@ Own Workspace, Stacked — with a ✓ on the active layout.
 
 The choice persists across reloads and reboots.
 
+## Window state memory
+
+Every window's size, position and maximized/fullscreen state is remembered
+(`remember_windows`), and restored:
+
+- **After lock screen / suspend.** Omarchy locks before suspend, and when the
+  machine wakes the monitor re-arrangement makes Hyprland forget that floating
+  windows were maximized — after login they used to come back as plain
+  floating windows. The layout now re-applies each window's remembered state a
+  moment after monitors (re)appear, so a window maximized with `Super+Alt+F`
+  stays maximized through lock → suspend → login.
+- **When an app reopens.** The first window of an app is placed at the last
+  size/position/state it had (float/own modes), like a traditional WM.
+- **Across crashes.** The memory is persisted to
+  `~/.local/state/omarchy/screen-estate/windows.db` and survives even a
+  compositor restart.
+
+Overlay windows whose titles match `remember_skip_titles` (default:
+`Picture-in-Picture`) are never remembered, so they can't poison an app's
+geometry.
+
 ## Omarchy menu & CLI
 
 Besides `Hyper+Space`, layouts can be picked from the Omarchy menu
@@ -83,6 +104,8 @@ Edit `~/.config/hypr/workspaces.lua`:
 - `default_mode` — starting mode (`"float"`, `"own"`, `"stacked"`, `"tiling"`)
 - `keep_classes` — apps never auto-relocated in `own` mode
 - `float_click_to_focus` — in float mode, focus windows by click instead of hover (`false` to keep follow-mouse)
+- `remember_windows` — remember/restore window size, position and maximized/fullscreen state (`false` to disable)
+- `remember_skip_titles` — window titles never remembered (default: `Picture-in-Picture`)
 
 ## License
 
