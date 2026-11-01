@@ -17,7 +17,7 @@ Own Workspace, Stacked — with a ✓ on the active layout.
 
 | Mode | Behavior |
 |---|---|
-| `float` *(default)* | Apps float on the **current workspace** at natural size. Resize once → size is remembered per app (`persistent_size`). Click-to-focus: hovering never steals focus (`float_click_to_focus`). |
+| `float` *(default)* | Apps float on the **current workspace** at natural size. Resize once → size is remembered per app (`persistent_size`). Any number of windows can be maximized at once — KDE/GNOME style: the focused one shows on top. Click-to-focus: hovering never steals focus (`float_click_to_focus`). |
 | `own` | Every new app gets **its own workspace** — nothing shares until you move it there. Closing a workspace's last window returns you to the previous one. |
 | `stacked` | Everything opens **maximized on workspace 1** (Monocle layout), one window visible at a time. |
 | `tiling` | Stock Hyprland dwindle tiling — nothing touched. |
@@ -33,7 +33,7 @@ Every window's size, position and maximized/fullscreen state is remembered
   machine wakes the monitor re-arrangement makes Hyprland forget that floating
   windows were maximized — after login they used to come back as plain
   floating windows. The layout now re-applies each window's remembered state a
-  moment after monitors (re)appear, so a window maximized with `Super+Alt+F`
+  moment after monitors (re)appear, so a window maximized with `Super+F`
   stays maximized through lock → suspend → login.
 - **When an app reopens.** The first window of an app is placed at the last
   size/position/state it had (float/own modes), like a traditional WM.
@@ -65,9 +65,10 @@ are the global modes from the table above.
 |---|---|
 | `Hyper+Space` | Cycle mode (own → float → stacked → tiling) |
 | `Hyper+←/→/↑/↓` | Snap floating window to screen half |
-| `Super+Alt+F` | Maximize / restore (float-safe) |
-| `Alt+Tab` / `Hyper+Tab` | Cycle windows (mode-aware; raises on top) |
-| `Super+F` | True fullscreen (stock Omarchy) |
+| `Super+F` | Maximize / restore (float-safe; several windows may be maximized at once) |
+| `Alt+Tab` | Cycle ALL open windows across every workspace (MRU order; follows the target to its workspace) |
+| `Hyper+Tab` | Cycle windows on the current workspace (mode-aware; raises on top) |
+| `Super+Alt+F` | True fullscreen (stock Omarchy) — one fullscreen window per workspace (Hyprland limit) |
 
 **Hyper** = `MOD3` (e.g. Caps Lock mapped to Hyper). Focused floating windows are always
 raised, so `Hyper+A/B/…`-style launch-or-focus binds land on top, not behind.

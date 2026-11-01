@@ -7,7 +7,9 @@
 --              every app opens FLOATING on the CURRENT workspace at its own
 --              natural size — no forced maximize or tiling. Drag, resize,
 --              overlap at will. Snaps to screen halves with Hyper+arrows,
---              maximizes with Super+Alt+F, cycles/raises with Alt+Tab.
+--              maximizes with Super+F. Alt+Tab switches between ALL
+--              open windows across EVERY workspace (MRU order, following
+--              the target to its workspace); Hyper+Tab stays local.
 --              Focus is click-to-focus (see float_click_to_focus below):
 --              hovering never steals focus from the current window.
 --              persistent_size: resize an app once and future windows of the
@@ -38,7 +40,7 @@
 -- Window state memory: every window's size, position and maximized/fullscreen
 -- state is remembered. This matters most around the lock screen: Omarchy locks
 -- before suspend, and when the machine wakes the monitor re-arrangement makes
--- Hyprland forget that floating windows were maximized (Super+Alt+F) — after
+-- Hyprland forget that floating windows were maximized (Super+F) — after
 -- login they'd come back as plain floating windows. The layout re-applies each
 -- window's remembered state a moment after monitors (re)appear. In float/own
 -- mode the first window of an app also reopens at its remembered
@@ -304,6 +306,22 @@ local function window_is_fullscreen(w)
   return w ~= nil and (w.fullscreen or 0) ~= 0
 end
 
+-- Fake-maximized: a floating window that fills the work area, marked with a
+-- static `maximized` tag (not Hyprland's fullscreen state — that allows only
+-- one such window per workspace; see the Super+F bind below).
+local function window_has_tag(win, tag)
+  for _, t in ipairs(win.tags or {}) do
+    if t == tag then
+      return true
+    end
+  end
+  return false
+end
+
+local function window_is_maximized(win)
+  return window_has_tag(win, "maximized")
+end
+
 -- Hyprland 0.56 fires `window.active` with a NULL window when focus is
 -- cleared (last window on a workspace closed, focus moved to a layer-shell
 -- surface) and hands Lua an EXPIRED HL.Window userdata instead of nil:
@@ -339,7 +357,8 @@ end
 
 -- Take a sample of a window's current state. Geometry is only recorded while
 -- the window is a plain float: a maximized/fullscreen window's at/size is the
--- work area, not the app's own size — the last normal geometry is kept then.
+-- work area, not the app's own size — the last normal geometry is kept then
+-- (that includes fake-maximized windows, which are tagged `maximized`).
 -- `force` records even while memory is frozen (see restore_after_monitor_event).
 local function sample_window(win, force)
   if not remember_windows or not window_is_alive(win) or win.pinned or window_memory_skipped(win) then
@@ -383,7 +402,7 @@ local function sample_window(win, force)
     rec.pfs, rec.changed = prev.pfs, prev.changed
   end
 
-  if fs == 0 and floating then
+  if fs == 0 and floating and not window_is_maximized(win) then
     local at, size = win.at, win.size
     if at ~= nil and size ~= nil and (size.x or 0) > 0 and (size.y or 0) > 0 then
       rec.x, rec.y, rec.w, rec.h = at.x, at.y, size.x, size.y
@@ -499,6 +518,29 @@ local function apply_remembered_state(win, r)
   end
 end
 
+-- Resize a floating window to fill its monitor's work area (bar and reserved
+-- edges excluded), like the fake maximize does.
+local function fill_work_area(win)
+  local mon = (win.monitor ~= nil and win.monitor.name ~= nil)
+      and hl.get_monitor(win.monitor.name) or nil
+  if mon == nil then
+    return
+  end
+  local reserved = type(mon.reserved) == "table" and mon.reserved or {}
+  local top = reserved.top or 0
+  local left = reserved.left or 0
+  local right = reserved.right or 0
+  local bottom = reserved.bottom or 0
+  local addr = "address:" .. win.address
+  -- Resize first, then move, so the window lands on the exact work area.
+  hl.dispatch(hl.dsp.window.resize({
+    x = mon.width - left - right,
+    y = mon.height - top - bottom,
+    window = addr,
+  }))
+  hl.dispatch(hl.dsp.window.move({ x = left, y = top, window = addr }))
+end
+
 -- Re-apply remembered state where a window no longer matches it. Runs a few
 -- times after monitor events, because the re-arrangement settles
 -- asynchronously over a couple of seconds (and passes that find nothing to do
@@ -512,9 +554,12 @@ local function restore_pass()
       local r = mem_by_address[win.address]
       if r ~= nil then
         local fs_now = win.fullscreen or 0
-        -- The lock-screen bug: maximized/fullscreen before the monitor event,
-        -- plain floating afterwards — put the state back.
-        if r.fs ~= 0 and fs_now ~= r.fs then
+        if window_is_maximized(win) then
+          -- Fake-maximized: keep filling the (possibly new) work area.
+          fill_work_area(win)
+        elseif r.fs ~= 0 and fs_now ~= r.fs then
+          -- The lock-screen bug: maximized/fullscreen before the monitor
+          -- event, plain floating afterwards — put the state back.
           apply_remembered_state(win, r)
         elseif r.fs == 0 and fs_now == 0 and win.floating then
           -- Plain float driven off its monitor (or collapsed to nothing)
@@ -691,37 +736,126 @@ local function float_all_on_workspace()
   end
 end
 
--- Replaces Omarchy's Alt+Tab binds with mode-aware versions.
+-- ---------------------------------- global Alt+Tab (all workspaces) ------
+-- Alt+Tab walks the MOST-RECENTLY-USED order of every mapped window across
+-- ALL workspaces (special/scratchpad workspaces excluded), focusing the
+-- target and following the view to its workspace — like a traditional
+-- desktop WM. Hyprland's cycle_next is workspace-local with no
+-- all-workspaces option, so the order is maintained here: window.active
+-- (below) moves every focus to the front of the list.
+--
+-- One press starts a ROTATION: the order is snapshotted once and repeated
+-- presses walk the snapshot by INDEX, so the list can not reorder under us
+-- mid-rotation (promotion races otherwise bounce between the two newest
+-- windows). Any focus change NOT made by the rotation (click, app
+-- self-raise, ...) ends it; the next press snapshots fresh MRU order.
+local tab_mru = {}        -- window addresses, most recently used first
+local tab_snapshot = nil  -- rotation snapshot: order frozen while tabbing
+local tab_pos = 0         -- index of the focused window in the snapshot
+
+local function mru_promote(addr)
+  if addr == nil then
+    return
+  end
+  for i, a in ipairs(tab_mru) do
+    if a == addr then
+      table.remove(tab_mru, i)
+      break
+    end
+  end
+  table.insert(tab_mru, 1, addr)
+end
+
+local function tab_cycle(reverse)
+  -- Live windows across all workspaces; special scratchpads stay out.
+  local live, live_windows = {}, {}
+  for _, win in ipairs(hl.get_windows() or {}) do
+    if window_is_alive(win) and win.workspace ~= nil and not win.workspace.special then
+      live[win.address] = true
+      table.insert(live_windows, win)
+    end
+  end
+
+  local current = nil
+  local active = hl.get_active_window()
+  if window_is_alive(active) then
+    current = active.address
+  end
+
+  -- The rotation stays alive only while focus is still where the previous
+  -- press left it. Switching workspaces fires INTERMEDIATE focus events
+  -- (the target workspace's last-focused window gets focus before our
+  -- target), so event-based rotation tracking bounces between two windows;
+  -- comparing the resulting focus at press time is race-free.
+  if tab_snapshot == nil or tab_snapshot[tab_pos] ~= current then
+    -- Fresh rotation: remembered recency first (closed windows drop out),
+    -- then windows never focused yet, in listing order — brand-new windows
+    -- are reachable immediately.
+    local ordered, seen = {}, {}
+    for _, addr in ipairs(tab_mru) do
+      if live[addr] and not seen[addr] then
+        seen[addr] = true
+        table.insert(ordered, addr)
+      end
+    end
+    for _, win in ipairs(live_windows) do
+      if not seen[win.address] then
+        seen[win.address] = true
+        table.insert(ordered, win.address)
+      end
+    end
+    tab_mru = ordered
+    -- The rotation walks a COPY: promotion below mutates tab_mru, but the
+    -- snapshot must stay frozen while the rotation is alive.
+    local snapshot = {}
+    for i, addr in ipairs(ordered) do
+      snapshot[i] = addr
+    end
+    tab_snapshot = snapshot
+
+    -- Start from where focus currently is; from no window (empty workspace,
+    -- layer surface) forward lands on the most recent, reverse on the last.
+    tab_pos = reverse and #snapshot + 1 or 0
+    for i, addr in ipairs(snapshot) do
+      if addr == current then
+        tab_pos = i
+        break
+      end
+    end
+  end
+
+  -- Step through the snapshot, skipping windows that died mid-rotation.
+  local count = #tab_snapshot
+  for _ = 1, count do
+    tab_pos = tab_pos + (reverse and -1 or 1)
+    if tab_pos < 1 then
+      tab_pos = count
+    elseif tab_pos > count then
+      tab_pos = 1
+    end
+    local addr = tab_snapshot[tab_pos]
+    if live[addr] then
+      for _, win in ipairs(live_windows) do
+        if win.address == addr then
+          hl.dispatch(hl.dsp.focus({ window = win }))
+          return
+        end
+      end
+    end
+  end
+  tab_snapshot = nil -- every snapshot window died: rotate fresh next time
+end
+
+-- Replaces Omarchy's Alt+Tab binds: Alt+Tab reaches every open window on
+-- every workspace; Hyper+Tab below stays within the current workspace.
 hl.unbind("ALT + TAB")
 hl.unbind("ALT + SHIFT + TAB")
 
-o.bind("ALT + TAB", "Focus on next window", function()
-  if mode == "stacked" then
-    hl.dispatch(hl.dsp.layout("cyclenext"))
-  else
-    if mode == "float" then
-      float_all_on_workspace()
-    end
-    hl.dispatch(hl.dsp.window.cycle_next())
-    local win = hl.get_active_window()
-    if win ~= nil and win.floating and not window_is_fullscreen(win) then
-      hl.dispatch(hl.dsp.window.bring_to_top())
-    end
-  end
+o.bind("ALT + TAB", "FOCUS-NEXT-ALL-WS", function()
+  tab_cycle(false)
 end)
-o.bind("ALT + SHIFT + TAB", "Focus on previous window", function()
-  if mode == "stacked" then
-    hl.dispatch(hl.dsp.layout("cycleprev"))
-  else
-    if mode == "float" then
-      float_all_on_workspace()
-    end
-    hl.dispatch(hl.dsp.window.cycle_next({ next = false }))
-    local win = hl.get_active_window()
-    if win ~= nil and win.floating and not window_is_fullscreen(win) then
-      hl.dispatch(hl.dsp.window.bring_to_top())
-    end
-  end
+o.bind("ALT + SHIFT + TAB", "FOCUS-PREV-ALL-WS", function()
+  tab_cycle(true)
 end)
 
 -- Blind Hyper-key cycling. Stacked uses layout messages; other modes cycle
@@ -752,6 +886,13 @@ hl.on("window.active", function(w)
     return
   end
 
+  -- Maintain the global Alt+Tab MRU order: every focus change promotes its
+  -- window to the front. (Rotation liveness is decided in tab_cycle by
+  -- comparing focus at press time — intermediate focus events from
+  -- workspace switches must not and do not break it.) Raise/re-float
+  -- handling below runs either way.
+  mru_promote(w.address)
+
   if mode ~= "float" then
     -- Other modes: raise only ordinary floating windows — z-swapping
     -- fullscreen/tiled windows desyncs input from rendering.
@@ -770,46 +911,78 @@ hl.on("window.active", function(w)
   if window_is_fullscreen(w) then
     -- Fullscreen windows own the top render layer, but a float raised
     -- earlier (by a previous focus) can stay stuck above it — the input/
-    -- rendering desync. Sink the other floats so the fullscreen window
-    -- shows through and stays clickable.
+    -- rendering desync. Sink every OTHER float — including other maximized
+    -- windows, so several can be maximized at once like on a regular
+    -- floating desktop (KDE/GNOME): the focused one is the visible one —
+    -- then raise the focused fullscreen window itself to be sure it sits
+    -- above whatever sinking left below.
     local ws = w.workspace
     if ws ~= nil then
       for _, win in ipairs(hl.get_workspace_windows(ws.id) or {}) do
-        if win.address ~= w.address and win.floating and not window_is_fullscreen(win) then
+        if win.address ~= w.address and win.floating then
           hl.dispatch(hl.dsp.window.alter_zorder({ mode = "bottom", window = win }))
         end
       end
     end
+    hl.dispatch(hl.dsp.window.alter_zorder({ mode = "top", window = w }))
   else
     hl.dispatch(hl.dsp.window.alter_zorder({ mode = "top", window = w }))
   end
 end)
 
--- Maximize/restore that stays in the floating layer in float mode: a tiled
--- window maximized with fullscreen state renders below floating windows and
--- cannot be raised. Floating it first makes maximize behave like a
--- traditional WM: full work-area size, raises on focus, restores cleanly.
+-- Maximize/restore. Hyprland allows only ONE fullscreen window per
+-- workspace — a second `fullscreen` request silently un-maximizes the first,
+-- so only one app could be maximized at a time. In float/own modes maximize
+-- is therefore FAKED: the window keeps floating but fills the work area,
+-- marked with a static `maximized` tag. Any number of windows can be
+-- maximized at once, and the focused one raises on top like on a regular
+-- floating desktop (KDE/GNOME). The tag also keeps the state-memory from
+-- recording work-area geometry as the window's "normal" size.
+hl.unbind("SUPER + F")
 hl.unbind("SUPER + ALT + F")
-o.bind("SUPER + ALT + F", "Maximize / restore", function()
+-- Swapped vs stock Omarchy: the float-safe maximize sits on the plain key.
+o.bind("SUPER + F", "Maximize / restore", function()
   local win = hl.get_active_window()
   if win == nil then
     return
   end
-  -- Remember the normal size/position right before toggling: while maximized
-  -- the window shows work-area geometry, and this is what a later restore
-  -- (lock-screen wake, app reopen) brings back. User-initiated: sample even
-  -- if a monitor-event freeze is active.
-  sample_window(win, true)
-  if mode == "float" and not win.floating then
-    hl.dispatch(hl.dsp.window.float({ action = "set", window = win }))
+  local addr = "address:" .. win.address
+  if mode == "float" or mode == "own" or window_is_maximized(win) then
+    if not win.floating then
+      hl.dispatch(hl.dsp.window.float({ action = "set", window = win }))
+    end
+    if window_is_maximized(win) then
+      -- Restore: drop the tag, bring back the remembered normal geometry.
+      hl.dispatch(hl.dsp.window.tag({ tag = "-maximized", window = addr }))
+      if (win.fullscreen or 0) ~= 0 then
+        -- Stale real-fullscreen state (mode switched while maximized):
+        -- the window is focused, so the plain dispatcher targets it.
+        hl.dispatch(hl.dsp.window.fullscreen({ action = "unset" }))
+      end
+      local r = mem_by_address[win.address]
+      if r ~= nil and r.w ~= nil and r.w > 0 then
+        apply_remembered_geometry(win, r)
+      end
+    else
+      -- Maximize: remember the normal size/position right before filling
+      -- (user-initiated: sample even if a monitor-event freeze is active).
+      sample_window(win, true)
+      hl.dispatch(hl.dsp.window.tag({ tag = "+maximized", window = addr }))
+      fill_work_area(win)
+    end
+    return
   end
+  -- stacked/tiling: real maximize — single-fullscreen-per-workspace is fine
+  -- in tiling layouts.
   hl.dispatch(hl.dsp.window.fullscreen({ mode = "maximized" }))
 end)
+-- True fullscreen: stock Omarchy behavior, moved here from Super+F.
+o.bind("SUPER + ALT + F", "True fullscreen", hl.dsp.window.fullscreen({ mode = "fullscreen" }))
 
 -- ------------------------------------------- half-screen snapping --------
 -- Aero/XFCE-style: Hyper+arrows snap the active FLOATING window to a half
 -- of the screen. Works in any mode, but only affects floating windows
--- (tiled windows are the layout's business). Maximizing is Super+Alt+F.
+-- (tiled windows are the layout's business). Maximizing is Super+F.
 local function snap_to_side(side)
   return function()
     local win = hl.get_active_window()
