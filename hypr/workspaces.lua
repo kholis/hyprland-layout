@@ -387,6 +387,10 @@ local mem_by_class = {}
 local memory_dirty = false
 local memory_last_flush = 0
 local memory_frozen_until = 0
+-- Addresses of freshly opened windows whose per-class record is held back
+-- until the open-restore (schedule_open_restore below) has been applied or
+-- ruled out — see the guard in sample_window.
+local restoring = {}
 
 local function window_memory_skipped(win)
   local title = win.title or ""
@@ -420,6 +424,9 @@ local function sample_window(win, force)
   end
 
   local fs = win.fullscreen or 0 -- 0 normal, 1 maximized, 2 fullscreen
+  if fs == 0 and window_is_maximized(win) then
+    fs = 1 -- fake maximize (Super+F): remember it as the maximized state
+  end
   local floating = win.floating == true
   local mon = win.monitor
   local mon_name = (mon ~= nil and mon.name) or ""
@@ -453,7 +460,20 @@ local function sample_window(win, force)
   end
 
   mem_by_address[win.address] = rec
-  mem_by_class[class] = rec
+  -- A brand-new window opens at the app's DEFAULT size; recording it into the
+  -- per-class memory (window.open, the first focus event, or the 2 s poll —
+  -- whichever fires first) would erase exactly the geometry/state the
+  -- open-restore is about to re-apply, so every relaunch would come up at the
+  -- default size and the remembered size would permanently drift to it.
+  -- Hold the class record until the window has been restored (or an app
+  -- running already took ownership of the class record); an app with nothing
+  -- remembered yet records normally.
+  if prev == nil and mem_by_class[class] ~= nil then
+    restoring[win.address] = true
+  end
+  if restoring[win.address] == nil then
+    mem_by_class[class] = rec
+  end
   memory_dirty = true
 end
 
@@ -474,6 +494,7 @@ local function sample_all_windows()
   for addr in pairs(mem_by_address) do
     if not alive[addr] then
       mem_by_address[addr] = nil
+      restoring[addr] = nil
     end
   end
 end
@@ -531,6 +552,10 @@ local function ensure_float(win)
   end
 end
 
+-- Fill the work area (fake maximize). Defined below — apply_remembered_state
+-- needs it earlier for restoring a remembered fake-maximized state.
+local fill_work_area
+
 -- Put a window back at a remembered geometry. Only when the monitor it was on
 -- still exists — otherwise Hyprland's own re-placement is the better guess.
 local function apply_remembered_geometry(win, r)
@@ -547,23 +572,43 @@ local function apply_remembered_geometry(win, r)
 end
 
 local function apply_remembered_state(win, r)
-  if r.fs ~= 0 then
+  if r.fs == 2 then
     if mode == "float" then
       ensure_float(win)
     end
     hl.dispatch(hl.dsp.window.fullscreen({
-      mode = r.fs == 2 and "fullscreen" or "maximized",
+      mode = "fullscreen",
       action = "set",
       window = win,
     }))
+  elseif r.fs == 1 then
+    if mode == "float" or mode == "own" then
+      -- Fake maximize, exactly like the Super+F handler: float + work-area
+      -- fill + `maximized` tag (several windows may be maximized at once,
+      -- and the tag keeps the state-memory from recording work-area
+      -- geometry as the window's normal size).
+      ensure_float(win)
+      hl.dispatch(hl.dsp.window.tag({
+        tag = "+maximized",
+        window = "address:" .. win.address,
+      }))
+      fill_work_area(win)
+    else
+      hl.dispatch(hl.dsp.window.fullscreen({
+        mode = "maximized",
+        action = "set",
+        window = win,
+      }))
+    end
   elseif r.w ~= nil and r.w > 0 then
     apply_remembered_geometry(win, r)
   end
 end
 
 -- Resize a floating window to fill its monitor's work area (bar and reserved
--- edges excluded), like the fake maximize does.
-local function fill_work_area(win)
+-- edges excluded), like the fake maximize does. Assigned
+-- to the forward-declared local above (apply_remembered_state calls it).
+fill_work_area = function(win)
   local mon = (win.monitor ~= nil and win.monitor.name ~= nil)
       and hl.get_monitor(win.monitor.name) or nil
   if mon == nil then
@@ -663,27 +708,36 @@ hl.on("workspace.move_to_monitor", restore_after_monitor_event)
 -- about where they belong). Geometry only applies to floating windows; the
 -- maximized/fullscreen state applies in float and own modes.
 local function schedule_open_restore(win)
+  local addr = win.address
+  local function bail()
+    restoring[addr] = nil
+  end
   if not remember_windows or (mode ~= "float" and mode ~= "own") then
+    bail()
     return
   end
   local class = win.initial_class or win.class
   if class == nil or class == "" then
+    bail()
     return
   end
   for _, other in ipairs(hl.get_windows() or {}) do
     if other.address ~= win.address and (other.initial_class or other.class) == class then
+      bail() -- not the app's first window: it records the class state itself
       return
     end
   end
 
-  local addr = win.address
   local remembered = mem_by_class[class]
   if remembered == nil then
+    bail()
     return
   end
 
   local applied = false
+  local passes = 0
   local function pass()
+    passes = passes + 1
     if applied then
       return
     end
@@ -695,10 +749,28 @@ local function schedule_open_restore(win)
       end
     end
     if not window_is_alive(target) or (target.fullscreen or 0) ~= 0 then
-      return -- gone again, or the app made it fullscreen itself: leave it be
+      if passes >= 2 then
+        -- Out of retries: gone again, or the app made it fullscreen itself.
+        -- Give up and hand the window back to normal class-memory sampling.
+        restoring[addr] = nil
+        applied = true
+      end
+      return
     end
+    restoring[addr] = nil
     if mode == "float" then
       ensure_float(target)
+    end
+    -- Seed the per-instance record with the remembered NORMAL geometry so a
+    -- later Super+F un-maximize brings back the app's normal size — not the
+    -- size the window happened to open at (a tagged window never records
+    -- geometry, so sampling alone would keep the opening size forever).
+    if (remembered.fs or 0) ~= 0 and (remembered.w or 0) > 0 then
+      local r0 = mem_by_address[addr]
+      if r0 ~= nil then
+        r0.x, r0.y = remembered.x, remembered.y
+        r0.w, r0.h = remembered.w, remembered.h
+      end
     end
     apply_remembered_state(target, remembered)
     sample_window(target)

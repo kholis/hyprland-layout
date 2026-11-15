@@ -36,7 +36,9 @@ Every window's size, position and maximized/fullscreen state is remembered
   moment after monitors (re)appear, so a window maximized with `Super+F`
   stays maximized through lock → suspend → login.
 - **When an app reopens.** The first window of an app is placed at the last
-  size/position/state it had (float/own modes), like a traditional WM.
+  size/position/state it had (float/own modes), including a `Super+F`
+  maximize — relaunching a maximized app reopens it maximized, and
+  un-maximizing brings back the remembered normal size — like a traditional WM.
 - **Across crashes.** The memory is persisted to
   `~/.local/state/omarchy/screen-estate/windows.db` and survives even a
   compositor restart.
