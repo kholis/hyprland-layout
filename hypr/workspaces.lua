@@ -139,6 +139,49 @@ end
 
 apply_mode()
 
+-- --------------------- Omarchy 4.5 follow_mouse arbitration ---------------
+-- Omarchy 4.5's workspace-modes module manages follow_mouse itself: it
+-- captures the value at startup and restores it on every workspace switch,
+-- which would stomp this layout's click-to-focus choice whenever the mode
+-- changes after login (Hypr + Space / hyprland-layout-set). Both modules
+-- register workspace.active handlers, but ours registered first, so Omarchy's
+-- runs last and wins the synchronous race. Re-assert our choice one tick
+-- later. On a workspace Omarchy itself floats (its Super+L mode, tagged
+-- omarchy-floating-workspace), Omarchy manages focus instead, so we yield.
+local function omarchy_floating_ws_active()
+  local ws = hl.get_active_workspace()
+  if ws == nil or ws.special then
+    return false
+  end
+  local windows = hl.get_workspace_windows(ws.id)
+  if windows == nil then
+    return false
+  end
+  for _, win in ipairs(windows) do
+    for _, tag in ipairs(win.tags or {}) do
+      if tag == "omarchy-floating-workspace" or tag == "omarchy-floating-workspace*" then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function reassert_follow_mouse()
+  if not float_click_to_focus then
+    return
+  end
+  hl.timer(function()
+    if omarchy_floating_ws_active() then
+      return
+    end
+    hl.config({ input = { follow_mouse = mode == "float" and 0 or 1 } })
+  end, { timeout = 50, type = "oneshot" })
+end
+
+hl.on("workspace.active", reassert_follow_mouse)
+hl.on("monitor.focused", reassert_follow_mouse)
+
 -- ------------------------------------------------- own: one app per ws ----
 -- First workspace ID >= `from` that carries no windows. Workspace selectors
 -- like "e+1" resolve unpredictably across versions, so compute it here.
