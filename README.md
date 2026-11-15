@@ -108,6 +108,27 @@ Edit `~/.config/hypr/workspaces.lua`:
 - `remember_windows` — remember/restore window size, position and maximized/fullscreen state (`false` to disable)
 - `remember_skip_titles` — window titles never remembered (default: `Picture-in-Picture`)
 
+## Omarchy 4.5 compatibility
+
+Omarchy 4.5 added per-workspace floating (Super+L cycles tiling → scrolling →
+floating, with a dock and titlebars). The two float systems coexist, with one
+workaround built in:
+
+- 4.5's `workspace-modes` module captures `input.follow_mouse` at startup and
+  restores it on every workspace switch, which would stomp this layout's
+  `float_click_to_focus` whenever the mode changes after login. The layout
+  re-asserts the choice on a short timer after Omarchy's own handler runs, and
+  yields on workspaces Omarchy floats itself (tagged
+  `omarchy-floating-workspace`), so both focus models stay correct.
+- Keep the two floats apart: don't press Super+L → floating while this layout
+  is in `float` mode — both would fight over window sizes. Super+L is only
+  meaningful while in `tiling` mode.
+- `stacked` mode relies on the global `monocle` layout, but per-workspace
+  layout rules saved by Omarchy (e.g. workspace 1 → tiling) override it on
+  those workspaces. Clear the saved rules under
+  `~/.local/state/omarchy/workspace-layouts/` if stacked windows tile instead
+  of stacking.
+
 ## License
 
 [MIT](LICENSE)
