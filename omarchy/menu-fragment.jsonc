@@ -5,7 +5,7 @@
     "icon": "󱂬", "label": "Workspace Layout", "title": "Workspace Layout", "action": ""
   },
   "trigger.toggle.workspace-layout.tiling": {
-    "icon": "󰀹", "label": "Tiling (Dwindle)", "description": "Stock dwindle tiling — default",
+    "icon": "󰀹", "label": "Tiling (Dwindle)", "description": "Stock dwindle tiling",
     "checked": "[[ \"$(hyprland-layout-set current)\" == \"tiling\" ]]",
     "action": "hyprland-layout-set tiling"
   },
